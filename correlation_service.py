@@ -12,14 +12,14 @@ import serial.tools.list_ports
 import sys
 from shutil import copyfile
 from datetime import datetime
-
+from numpy import mean
 import signal
 
 print('Warning! Max 50000 photons/sec!')
 
 clock=42.0e6; # Arduino Due clock speed
-bunchsize=1024; #How many bytes coming each time from the serial port
-photons_to_correlate=256;
+bunchsize=2048; #How many bytes coming each time from the serial port
+photons_to_correlate=2048;
 crossover=0.001; #where to collate the fast and slow correlators
 
 duration=60;
@@ -66,20 +66,44 @@ fmt = "<%dI" % (len(data) // 4);
 def read_photons(ser):
 	global times;
 	while time()-t0<duration:
-                t1=time();
                 data=ser.read(bunchsize);
-                times.extend(list(unpack(fmt, data)));
-                t2=time();
-                elapsed=round(t2-t0,2);
-                print('Time: ',elapsed,'sec, Photons per sec: ',round(bunchsize/4/(t2-t1),0),end="\r")
+                times.extend(list(unpack(fmt, data)))
 
+# correlation function defition
+def correlate_photons():
+	global printed_end, arrival_times, times_between_photons, offset, running, tt, ttslow, g2, g2s, nfotoni, indx, tplot
+	while running:
+		if not(dataThread.isAlive()):
+                	if todo>0 and printed_end==False:
+                        	printed_end=True;
+                        	print('');
+                        	print('Acquisition ended, completing correlation...');
+                	elif todo==0:
+                        	print('Done!')
+                        	running=False;
+			
+			
+		if indx==0:
+			arrival_times=[];
+			time_between_photons=[];
+			offset=0;
+		
+		todo=min(photons_to_correlate,len(times));
+		if todo>0:
+                	[arrival_times,time_between_photons,frames]=multitau_arduino.process_photons(times[:todo],offset,crossover,clock,arrival_times,time_between_photons);	
+                	indx=fast.correlate_photons(arrival_times);
+                	if printed_end==False:
+                        	elapsed=round(time()-t0,2);
+                        	print('Time: ',elapsed,'sec, Photons per sec: ',round(mean(frames)/crossover,0),end="\r")
+                	slow.correlate(frames);
+                	[arrival_times,offset]=multitau_arduino.post_process_photons(arrival_times,indx);
+                	del times[:indx+1];
+                	
+		if (time()-tplot)>3:
+			[tt,g2,nfotoni]=fast.normalize();
+			[ttslow,g2s]=slow.normalize();
+			tplot=time();
 
-#starting data acquisition thread
-starttime=datetime.now().strftime('%d-%b-%Y %H:%M:%S');
-t0=time();
-indx=0;
-dataThread=threading.Thread(target=read_photons, args=(ser,)); #starting the data acquisition thread;
-dataThread.start();
 
 # Ending on Control-C
 def handler(signum, frame):
@@ -87,42 +111,29 @@ def handler(signum, frame):
         duration=time()-t0;
 signal.signal(signal.SIGINT, handler)
 
+
+
+#starting data acquisition thread
+starttime=datetime.now().strftime('%d-%b-%Y %H:%M:%S');
+t0=time();
+indx=0;
+
+dataThread=threading.Thread(target=read_photons, args=(ser,)); #starting the data acquisition thread;
+dataThread.start();
+
 #starting correlation
 running=True;
 tplot=time();
 printed_end=False;
-while running:
-	if not(dataThread.isAlive()):
-                if todo>0 and printed_end==False:
-                        printed_end=True;
-                        print('');
-                        print('Acquisition ended, completing correlation...');
-                elif todo==0:
-                        print('Done!')
-                        running=False;
-		
-		
-	if indx==0:
-		arrival_times=[];
-		time_between_photons=[];
-		offset=0;
-	
-	todo=min(photons_to_correlate,len(times));
-	if todo>0:
-                [arrival_times,time_between_photons,frames]=multitau_arduino.process_photons(times[:todo],offset,crossover,clock,arrival_times,time_between_photons);	
-                indx=fast.correlate_photons(arrival_times);
-                slow.correlate(frames);
-                [arrival_times,offset]=multitau_arduino.post_process_photons(arrival_times,indx);
-                del times[:indx+1];
-                
-	if (time()-tplot)>3:
-		[tt,g2,nfotoni]=fast.normalize();
-		[ttslow,g2s]=slow.normalize();
-		tplot=time();
 
-[tt,g2,nfotoni]=fast.normalize();
-[ttslow,g2s]=slow.normalize();
+corrThread=threading.Thread(target=correlate_photons, args=()); #starting the datacorrelation acquisition thread;
+corrThread.start();
 
-ser.write(b'd')     # Stop Acquisition
-ser.close()         #Closing serial connection
+
+
+#[tt,g2,nfotoni]=fast.normalize();
+#[ttslow,g2s]=slow.normalize();
+
+#ser.write(b'd')     # Stop Acquisition
+#ser.close()         #Closing serial connection
 
